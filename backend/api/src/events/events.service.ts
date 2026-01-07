@@ -3,12 +3,14 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ReceiveEventDto } from './dto/receive-event.dto';
 import { Event } from './event.entity';
+import { EventProcessorService } from './event-processor/event-processor.service';
 
 @Injectable()
 export class EventsService {
   constructor(
     @InjectRepository(Event)
     private readonly repo: Repository<Event>,
+    private readonly processor: EventProcessorService,
   ) {}
 
   async receive(dto: ReceiveEventDto) {
@@ -24,17 +26,17 @@ export class EventsService {
       };
     }
 
-    const event = this.repo.create({
-      externalEventId: dto.externalEventId,
-      source: dto.source,
-      payload: dto.payload,
-      status: 'PENDING',
-    });
+    const saved = await this.repo.save(
+      this.repo.create({
+        externalEventId: dto.externalEventId,
+        source: dto.source,
+        payload: dto.payload,
+        status: 'PENDING',
+      }),
+    );
 
-    const saved = await this.repo.save(event);
-
-    // async boundary placeholder (Lambda later)
-    void this.processEventAsync(saved.id);
+    // Async boundary: later this becomes Lambda
+    void this.processor.process(saved.id);
 
     return {
       received: true,
@@ -50,25 +52,5 @@ export class EventsService {
 
   findById(id: string) {
     return this.repo.findOne({ where: { id } });
-  }
-
-  private async processEventAsync(eventId: string) {
-    const event = await this.repo.findOne({ where: { id: eventId } });
-    if (!event) return;
-
-    try {
-      event.status = 'PROCESSING';
-      await this.repo.save(event);
-
-      await new Promise((res) => setTimeout(res, 800));
-
-      if (event.payload?.fail === true)
-        throw new Error('Simulated processing failure');
-
-      event.status = 'COMPLETED';
-      await this.repo.save(event);
-    } catch {
-      await this.repo.update({ id: eventId }, { status: 'FAILED' });
-    }
   }
 }
