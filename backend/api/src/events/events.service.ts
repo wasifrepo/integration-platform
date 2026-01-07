@@ -1,77 +1,74 @@
 import { Injectable } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { ReceiveEventDto } from './dto/receive-event.dto';
-
-type EventStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
-
-type EventRecord = {
-  id: string;
-  externalEventId: string;
-  source: string;
-  payload: Record<string, any>;
-  status: EventStatus;
-  createdAt: string;
-  updatedAt: string;
-};
+import { Event } from './event.entity';
 
 @Injectable()
 export class EventsService {
-  private events: EventRecord[] = [];
+  constructor(
+    @InjectRepository(Event)
+    private readonly repo: Repository<Event>,
+  ) {}
 
-  receive(dto: ReceiveEventDto) {
-    // Idempotency: third-party webhooks can be delivered multiple times
-    const existing = this.events.find((e) => e.externalEventId === dto.externalEventId);
+  async receive(dto: ReceiveEventDto) {
+    const existing = await this.repo.findOne({
+      where: { externalEventId: dto.externalEventId },
+    });
     if (existing) {
-      return { received: true, duplicate: true, eventId: existing.id, status: existing.status };
+      return {
+        received: true,
+        duplicate: true,
+        eventId: existing.id,
+        status: existing.status,
+      };
     }
 
-    const now = new Date().toISOString();
-    const event: EventRecord = {
-      id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}`,
+    const event = this.repo.create({
       externalEventId: dto.externalEventId,
       source: dto.source,
       payload: dto.payload,
       status: 'PENDING',
-      createdAt: now,
-      updatedAt: now,
+    });
+
+    const saved = await this.repo.save(event);
+
+    // async boundary placeholder (Lambda later)
+    void this.processEventAsync(saved.id);
+
+    return {
+      received: true,
+      duplicate: false,
+      eventId: saved.id,
+      status: saved.status,
     };
-
-    this.events.push(event);
-
-    // Mock async processing boundary (later becomes Lambda)
-    void this.processEventAsync(event.id);
-
-    return { received: true, duplicate: false, eventId: event.id, status: event.status };
   }
 
   findAll() {
-    return this.events;
+    return this.repo.find({ order: { createdAt: 'DESC' } });
   }
 
   findById(id: string) {
-    return this.events.find((e) => e.id === id) ?? null;
+    return this.repo.findOne({ where: { id } });
   }
 
   private async processEventAsync(eventId: string) {
-    const event = this.events.find((e) => e.id === eventId);
+    const event = await this.repo.findOne({ where: { id: eventId } });
     if (!event) return;
 
     try {
       event.status = 'PROCESSING';
-      event.updatedAt = new Date().toISOString();
+      await this.repo.save(event);
 
-      // Simulate processing delay (represents downstream calls, transforms, DB writes, etc.)
       await new Promise((res) => setTimeout(res, 800));
 
-      // Example mock rule: if payload contains fail=true, mark FAILED
-      if (event.payload?.fail === true) {
+      if (event.payload?.fail === true)
         throw new Error('Simulated processing failure');
-      }
 
       event.status = 'COMPLETED';
-      event.updatedAt = new Date().toISOString();
+      await this.repo.save(event);
     } catch {
-      event.status = 'FAILED';
-      event.updatedAt = new Date().toISOString();
+      await this.repo.update({ id: eventId }, { status: 'FAILED' });
     }
   }
 }
